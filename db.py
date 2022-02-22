@@ -1,6 +1,7 @@
 from ctypes import string_at
 import re
 from string import Template
+from unicodedata import name
 from bson.json_util import object_hook
 from pymongo import MongoClient
 from datetime import datetime
@@ -46,9 +47,13 @@ def save_user(username, email, password,sign):
 
 
 ## In case you want to create aditional templates you would need to modify and run this function.
+def add_template1():
+    temp_type='parent_contract'
+    temp="This contract $contract_name for data access with contract_id $contract_id is entered between the group $group hereinafter refered to as buyer, and $supplier hereinafter refered as supplier. The supplier agrees to provide the buyer group and all the members contained on it for a maximum of $user_ammount users, with access to the data resource(s) $data_resources in accordance with the following terms: The requested buyer shall have access to the requested resource(s) $data_resources with access rights $access_rights. From $st_date to $end_date after which moment the access permissions will be removed. Buyer signature $buyer_sign. Supplier signature $seller_sign"
+    templates_collection.insert_one({'temp_type':temp_type,'template':temp})
 def add_template():
-    temp_type='single_buyer'
-    temp="Hereby I $seller authorize the access to $buyer for the following databases: $data from $start_date to $end_date for the following roles $authorized_roles. Seller signature $seller_sign, Buyer signature $buyer_sign"
+    temp_type='child_contract'
+    temp="This sub-contract for data access with contract_id $contract_id which refers to the parent_contract {LTU-Boliden}, with id $contract_id, is entered between the user $user and manager $man. The user agrees to be part of the work group $group for the following $data_resources with access rights $access_rights. The child agrees to give proper use, not share nor distribute the data which is granted access according to General Data protection regulation GDPR.  Access to the data is granted from $st_date to $end_date at which point rights will be revoked. User signature $buyer_sign. Manager signature $seller_sign"
     templates_collection.insert_one({'temp_type':temp_type,'template':temp})
 
 # Gets the user data, used for the login system
@@ -57,20 +62,36 @@ def get_user(username):
     return User(user_data['username'], user_data['email'], user_data['password'],user_data['sign']) if user_data else None
 
 # Creates a new permission request and creates the first offer of the negotiation
-def new_permi(username, item, st_date, end_date, role,offering):
+def parent(neg_type,username, user_ammount,item, st_date, end_date, role,offering):
     status= 'submitted'
+    contract_name=neg_name_gen(username,item)
     access_req=access_collection.insert_one(
-                {'demander':username, 'provider':get_provider(item), 'creation_date':datetime.now(),'offer': offering,'request_details':
-                                                                                                        {'item':item,'start_date':st_date,'end_date':end_date,'role':role},'status':status }).inserted_id
-    ## Add new nego
-    offer(access_req,username, item, st_date, end_date, role,offering)
+                {'type':neg_type,'contract_name':contract_name,'demander':username, 'provider':get_provider(item), 'creation_date':datetime.now(),'offer': offering,'request_details':
+                                                                                                        {'user_ammount':user_ammount,'item':item,'start_date':st_date,'end_date':end_date,'role':role},'status':status }).inserted_id
+        ## Add new nego
+    offer_parent(access_req,username,user_ammount, item, st_date, end_date, role,offering)
     return access_req
 
-# Function that creates orders
-def offer(req_id,username, item, st_date, end_date, role,offering):
+
+def child(neg_type,parent_id,parent_name,username,item, st_date, end_date, role,offering): #Child agreement need parent agreement name i.e. LTU- Boliden to create children agreement
+    status= 'submitted'
+    parent_data=parent_info(parent_name)
+    access_req=access_collection.insert_one(
+                {'type':neg_type,'parent_id':parent_id,'parent_name':parent_name,'demander':username, 'provider':parent_data['demander'], 'creation_date':datetime.now(),'offer': offering,'request_details':
+                                                                                                        {'item':item,'start_date':st_date,'end_date':end_date,'role':role},'status':status }).inserted_id
+    ## Add new nego
+    offer_child(access_req,username,1, item, st_date, end_date, role,offering,parent_data['demander'])
+    return access_req
+
+# Function that creates orders for parent and children agreements
+def offer_parent(req_id,username, user_ammount,item, st_date, end_date, role,offering):
     dataset=data_collection.find_one({'name':item})
     negotiations_collection.insert_one({'req_id':ObjectId(req_id),'demander':username, 'provider':get_provider(item), 'creation_date':datetime.now(),'offer': offering ,'request_details':
-                                                                                                        {'item_id': dataset['_id'], 'item':item,'start_date':st_date,'end_date':end_date,'role':role}})
+                                                                                                        {'user_ammount':user_ammount,'item_id': dataset['_id'], 'item':item,'start_date':st_date,'end_date':end_date,'role':role}})
+def offer_child(req_id,username, user_ammount,item, st_date, end_date, role,offering,demander):
+    dataset=data_collection.find_one({'name':item})
+    negotiations_collection.insert_one({'req_id':ObjectId(req_id),'demander':username, 'provider':demander, 'creation_date':datetime.now(),'offer': offering ,'request_details':
+                                                                                                        {'user_ammount':user_ammount,'item_id': dataset['_id'], 'item':item,'start_date':st_date,'end_date':end_date,'role':role}})
 
 # This will get the provider of the specified resource name
 def get_provider(name ):
@@ -126,12 +147,63 @@ def update(req_id, offer, item, start_date, end_date, role):
                                                                 'request_details.role':role}})
 
 # Signs the contract and returns it 
-def sign_contract(req_id):
+def sign_contract(req_id,type):
     neg= access_collection.find_one({'_id':ObjectId(req_id)})
-    temp_type= "single_buyer" # currently hardcoded
-    temp=Template(get_template(temp_type))
-    d= dict(seller=neg['provider'],buyer=neg['demander'],data=neg['request_details']['item'],start_date=neg['request_details']['start_date'],end_date=neg['request_details']['end_date'],
-                        authorized_roles=neg['request_details']['role'],seller_sign=get_sign(neg['provider']), buyer_sign=get_sign(neg['demander'])  )
+
+    if type=='parent':
+
+        temp_type= "parent_contract" # Sign contract for Parent
+        temp=Template(get_template(temp_type))
+        d= dict(contract_name=neg['contract_name'],contract_id=neg['_id'],supplier=neg['provider'],group=neg['demander'],user_ammount=neg['request_details']['user_ammount'],data_resources=neg['request_details']['item'],st_date=neg['request_details']['start_date'],end_date=neg['request_details']['end_date'],
+        access_rights=neg['request_details']['role'],seller_sign=get_sign(neg['provider']), buyer_sign=get_sign(neg['demander']) )
+    elif type=='child':
+        
+        temp_type= "child_contract" # Sign contract for child
+        temp=Template(get_template(temp_type))
+        d= dict(contract_id=neg['_id'],parent_name=neg['parent_name'],parent_id=neg['parent_id'],man=neg['provider'],user=neg['demander'],group=neg['parent_name'],data_resources=neg['request_details']['item'],st_date=neg['request_details']['start_date'],end_date=neg['request_details']['end_date'],
+        access_rights=neg['request_details']['role'],seller_sign=get_sign(neg['provider']), buyer_sign=get_sign(neg['demander']) )
     signed_c=temp.safe_substitute(d)
     contracts_collection.insert_one({'req_id':ObjectId(req_id), 'provider':neg['provider'],'demander':neg['demander'],'creation_date': datetime.now(),'contract':signed_c})
     return signed_c
+
+#Return all the finished negotiations available for the current user
+def negotiations(user):
+    negotiations= list(access_collection.find({'type':'parent','status':'accepted',"provider":{"$ne":user}}))
+    keys_to_remove=['type','offer','status']
+    for i in negotiations:
+        for j in keys_to_remove:
+            i.pop(j)
+    return(JSONEncoder().encode(negotiations))
+
+#Find resources to negotiatiate on, can only negotiate in parent negotiations
+def find_resources(user): 
+    data_resources=list(data_collection.find({"owner":{"$ne":user}}))
+    return(JSONEncoder().encode(data_resources))
+
+#Checks if the parent agreement exists and if it has already concluded
+def parent_acc_check(parent):
+    parent= access_collection.find_one({'_id':ObjectId(parent)})
+    if parent['status']=='accepted':
+        return 'Parent accepted'
+    else: False
+
+#Checks if the date of the child agreement is between the ranges specified in parent contract
+def date_check(parent,st_date,end_date):
+    parentagg= access_collection.find_one({'_id':ObjectId(parent)})
+    if parentagg['request_details']['start_date']>st_date or parentagg['request_details']['end_date']<end_date:
+        return False
+    else:
+        return 'date check passed'
+
+#Generates the name of the agreement in parent contracts between group and database owner i.e. LTU and Boliden returns LTU - Boliden
+def neg_name_gen(group, data_source):
+    sup=get_provider(data_source)
+    agg_name=group+' - '+sup
+    print(agg_name)
+    return agg_name
+
+#Returns information of the parent contract
+def parent_info(name):
+    neg=access_collection.find_one({'contract_name':name})
+    return(neg)
+
